@@ -7,6 +7,24 @@ const DEFAULT_BASE_URL = "https://cloud.langfuse.com";
 const DEFAULT_FLUSH_AT = 15;
 const DEFAULT_FLUSH_INTERVAL_MS = 10000;
 
+// Module-level state for hook access
+let _traceManager: TraceManager | null = null;
+let _observabilityRegistry: ObservabilityRegistry | null = null;
+
+/**
+ * Get the current trace manager instance (for hook access).
+ */
+export function getTraceManager(): TraceManager | null {
+  return _traceManager;
+}
+
+/**
+ * Get the current observability registry instance (for hook access).
+ */
+export function getObservabilityRegistry(): ObservabilityRegistry | null {
+  return _observabilityRegistry;
+}
+
 /**
  * Creates the Langfuse diagnostics service following the diagnostics-otel pattern.
  */
@@ -60,6 +78,10 @@ export function createDiagnosticsLangfuseService(): OpenClawPluginService {
         traceManager = new TraceManager(langfuse);
         observabilityRegistry = new ObservabilityRegistry();
 
+        // Set module-level references for hook access
+        _traceManager = traceManager;
+        _observabilityRegistry = observabilityRegistry;
+
         ctx.logger.info("diagnostics-langfuse: Langfuse tracing enabled", {
           baseUrl,
           flushAt: langfuseCfg.flushAt ?? DEFAULT_FLUSH_AT,
@@ -100,6 +122,10 @@ export function createDiagnosticsLangfuseService(): OpenClawPluginService {
       }
 
       observabilityRegistry = null;
+
+      // Clear module-level references
+      _traceManager = null;
+      _observabilityRegistry = null;
     },
   };
 }
@@ -141,6 +167,14 @@ function handleDiagnosticEvent(
 
       case "run.attempt":
         handleRunAttempt(evt, traceManager);
+        break;
+
+      case "tool.start":
+        handleToolStart(evt, traceManager);
+        break;
+
+      case "tool.end":
+        handleToolEnd(evt, traceManager);
         break;
 
       case "diagnostic.heartbeat":
@@ -371,5 +405,50 @@ function handleRunAttempt(
       runId: evt.runId,
       channel: evt.channel,
     },
+  });
+}
+
+/**
+ * Handle tool start events.
+ * Creates a span for tool execution tracking.
+ */
+function handleToolStart(
+  evt: Extract<DiagnosticEventPayload, { type: "tool.start" }>,
+  traceManager: TraceManager,
+): void {
+  // Use sessionKey as the primary trace identifier
+  const traceId = evt.sessionKey ?? evt.runId ?? `tool_${Date.now()}`;
+
+  // Ensure trace exists before creating tool span
+  traceManager.getOrCreateTrace(traceId, evt.sessionKey, evt.channel);
+
+  // Start a tool span using the trace manager
+  traceManager.startToolSpan(traceId, {
+    name: evt.toolName,
+    input: evt.input,
+    metadata: {
+      toolCallId: evt.toolCallId,
+      runId: evt.runId,
+      sessionKey: evt.sessionKey,
+    },
+  });
+}
+
+/**
+ * Handle tool end events.
+ * Ends the tool span with result and error information.
+ */
+function handleToolEnd(
+  evt: Extract<DiagnosticEventPayload, { type: "tool.end" }>,
+  traceManager: TraceManager,
+): void {
+  // Use sessionKey as the primary trace identifier (must match tool.start)
+  const traceId = evt.sessionKey ?? evt.runId ?? `tool_${Date.now()}`;
+
+  // End the tool span
+  traceManager.endToolSpan(traceId, {
+    output: evt.output,
+    error: evt.error,
+    durationMs: evt.durationMs,
   });
 }

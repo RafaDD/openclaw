@@ -131,6 +131,36 @@ export type DiagnosticHeartbeatEvent = DiagnosticBaseEvent & {
   queued: number;
 };
 
+export type DiagnosticToolStartEvent = DiagnosticBaseEvent & {
+  type: "tool.start";
+  sessionKey?: string;
+  sessionId?: string;
+  runId?: string;
+  channel?: string;
+  toolName: string;
+  toolCallId: string;
+  /** Tool input arguments (may be truncated for large inputs). */
+  input?: unknown;
+};
+
+export type DiagnosticToolEndEvent = DiagnosticBaseEvent & {
+  type: "tool.end";
+  sessionKey?: string;
+  sessionId?: string;
+  runId?: string;
+  channel?: string;
+  toolName: string;
+  toolCallId: string;
+  /** Duration of the tool execution in milliseconds. */
+  durationMs?: number;
+  /** Whether the tool execution resulted in an error. */
+  isError?: boolean;
+  /** Error message if the tool failed. */
+  error?: string;
+  /** Tool output result (may be truncated for large outputs). */
+  output?: unknown;
+};
+
 export type DiagnosticEventPayload =
   | DiagnosticUsageEvent
   | DiagnosticWebhookReceivedEvent
@@ -143,7 +173,9 @@ export type DiagnosticEventPayload =
   | DiagnosticLaneEnqueueEvent
   | DiagnosticLaneDequeueEvent
   | DiagnosticRunAttemptEvent
-  | DiagnosticHeartbeatEvent;
+  | DiagnosticHeartbeatEvent
+  | DiagnosticToolStartEvent
+  | DiagnosticToolEndEvent;
 
 export type DiagnosticEventInput = DiagnosticEventPayload extends infer Event
   ? Event extends DiagnosticEventPayload

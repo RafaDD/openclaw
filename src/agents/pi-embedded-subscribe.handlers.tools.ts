@@ -1,6 +1,7 @@
 import type { AgentEvent } from "@mariozechner/pi-agent-core";
 import type { EmbeddedPiSubscribeContext } from "./pi-embedded-subscribe.handlers.types.js";
-import { emitAgentEvent } from "../infra/agent-events.js";
+import { emitAgentEvent, getAgentRunContext } from "../infra/agent-events.js";
+import { emitDiagnosticEvent } from "../infra/diagnostic-events.js";
 import { normalizeTextForComparison } from "./pi-embedded-helpers.js";
 import { isMessagingTool, isMessagingToolSendAction } from "./pi-embedded-messaging.js";
 import {
@@ -12,6 +13,29 @@ import {
 } from "./pi-embedded-subscribe.tools.js";
 import { inferToolMetaFromArgs } from "./pi-embedded-utils.js";
 import { normalizeToolName } from "./tool-policy.js";
+
+// Track tool execution start times for duration calculation
+const toolStartTimes = new Map<string, number>();
+
+/**
+ * Truncate large values for diagnostic events to avoid excessive payload sizes.
+ */
+function truncateForDiagnostic(value: unknown, maxLength = 2000): unknown {
+  if (value === null || value === undefined) {
+    return value;
+  }
+  if (typeof value === "string") {
+    return value.length > maxLength ? value.slice(0, maxLength) + "..." : value;
+  }
+  if (typeof value === "object") {
+    const str = JSON.stringify(value);
+    if (str.length > maxLength) {
+      return str.slice(0, maxLength) + "...";
+    }
+    return value;
+  }
+  return value;
+}
 
 function extendExecMeta(toolName: string, args: unknown, meta?: string): string | undefined {
   const normalized = toolName.trim().toLowerCase();
@@ -50,6 +74,21 @@ export async function handleToolExecutionStart(
   const toolName = normalizeToolName(rawToolName);
   const toolCallId = String(evt.toolCallId);
   const args = evt.args;
+  const runId = ctx.params.runId;
+
+  // Track start time for duration calculation
+  toolStartTimes.set(toolCallId, Date.now());
+
+  // Emit diagnostic event for tool start
+  const runContext = getAgentRunContext(runId);
+  emitDiagnosticEvent({
+    type: "tool.start",
+    sessionKey: runContext?.sessionKey,
+    runId,
+    toolName,
+    toolCallId,
+    input: truncateForDiagnostic(args),
+  });
 
   if (toolName === "read") {
     const record = args && typeof args === "object" ? (args as Record<string, unknown>) : {};
@@ -164,8 +203,29 @@ export function handleToolExecutionEnd(
   ctx.state.toolMetas.push({ toolName, meta });
   ctx.state.toolMetaById.delete(toolCallId);
   ctx.state.toolSummaryById.delete(toolCallId);
+
+  // Calculate duration and emit diagnostic event
+  const runId = ctx.params.runId;
+  const startTime = toolStartTimes.get(toolCallId);
+  const durationMs = startTime ? Date.now() - startTime : undefined;
+  toolStartTimes.delete(toolCallId);
+
+  const runContext = getAgentRunContext(runId);
+  const errorMessage = isToolError ? extractToolErrorMessage(sanitizedResult) : undefined;
+
+  emitDiagnosticEvent({
+    type: "tool.end",
+    sessionKey: runContext?.sessionKey,
+    runId,
+    toolName,
+    toolCallId,
+    durationMs,
+    isError: isToolError,
+    error: errorMessage,
+    output: truncateForDiagnostic(sanitizedResult),
+  });
+
   if (isToolError) {
-    const errorMessage = extractToolErrorMessage(sanitizedResult);
     ctx.state.lastToolError = {
       toolName,
       meta,
