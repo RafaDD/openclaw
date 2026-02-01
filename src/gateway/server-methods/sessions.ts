@@ -12,6 +12,7 @@ import {
   type SessionEntry,
   updateSessionStore,
 } from "../../config/sessions.js";
+import { emitDiagnosticEvent } from "../../infra/diagnostic-events.js";
 import {
   ErrorCodes,
   errorShape,
@@ -224,6 +225,11 @@ export const sessionsHandlers: GatewayRequestHandlers = {
     const cfg = loadConfig();
     const target = resolveGatewaySessionStoreTarget({ cfg, key });
     const storePath = target.storePath;
+
+    // Track old session info for diagnostic event
+    let oldSessionId: string | undefined;
+    let oldChannel: string | undefined;
+
     const next = await updateSessionStore(storePath, (store) => {
       const primaryKey = target.storeKeys[0] ?? key;
       const existingKey = target.storeKeys.find((candidate) => store[candidate]);
@@ -232,6 +238,11 @@ export const sessionsHandlers: GatewayRequestHandlers = {
         delete store[existingKey];
       }
       const entry = store[primaryKey];
+
+      // Capture old session info before replacing
+      oldSessionId = entry?.sessionId;
+      oldChannel = entry?.lastChannel;
+
       const now = Date.now();
       const nextEntry: SessionEntry = {
         sessionId: randomUUID(),
@@ -258,6 +269,19 @@ export const sessionsHandlers: GatewayRequestHandlers = {
       store[primaryKey] = nextEntry;
       return nextEntry;
     });
+
+    // Emit session.state:ended for the old session (for Langfuse trace finalization)
+    if (oldSessionId) {
+      emitDiagnosticEvent({
+        type: "session.state",
+        sessionKey: target.canonicalKey,
+        sessionId: oldSessionId,
+        channel: oldChannel,
+        state: "ended",
+        reason: "reset",
+      });
+    }
+
     respond(true, { ok: true, key: target.canonicalKey, entry: next }, undefined);
   },
   "sessions.delete": async ({ params, respond }) => {

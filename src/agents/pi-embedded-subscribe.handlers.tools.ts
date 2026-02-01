@@ -1,6 +1,6 @@
 import type { AgentEvent } from "@mariozechner/pi-agent-core";
 import type { EmbeddedPiSubscribeContext } from "./pi-embedded-subscribe.handlers.types.js";
-import { emitAgentEvent, getAgentRunContext } from "../infra/agent-events.js";
+import { emitAgentEvent } from "../infra/agent-events.js";
 import { emitDiagnosticEvent } from "../infra/diagnostic-events.js";
 import { normalizeTextForComparison } from "./pi-embedded-helpers.js";
 import { isMessagingTool, isMessagingToolSendAction } from "./pi-embedded-messaging.js";
@@ -80,10 +80,12 @@ export async function handleToolExecutionStart(
   toolStartTimes.set(toolCallId, Date.now());
 
   // Emit diagnostic event for tool start
-  const runContext = getAgentRunContext(runId);
+  // Use sessionId for trace isolation (changes on /reset or /new)
+  // Use sessionKey for grouping (stays same for user/channel)
   emitDiagnosticEvent({
     type: "tool.start",
-    sessionKey: runContext?.sessionKey,
+    sessionId: ctx.params.sessionId,
+    sessionKey: ctx.params.sessionKey,
     runId,
     toolName,
     toolCallId,
@@ -210,12 +212,14 @@ export function handleToolExecutionEnd(
   const durationMs = startTime ? Date.now() - startTime : undefined;
   toolStartTimes.delete(toolCallId);
 
-  const runContext = getAgentRunContext(runId);
   const errorMessage = isToolError ? extractToolErrorMessage(sanitizedResult) : undefined;
 
+  // Use sessionId for trace isolation (changes on /reset or /new)
+  // Use sessionKey for grouping (stays same for user/channel)
   emitDiagnosticEvent({
     type: "tool.end",
-    sessionKey: runContext?.sessionKey,
+    sessionId: ctx.params.sessionId,
+    sessionKey: ctx.params.sessionKey,
     runId,
     toolName,
     toolCallId,

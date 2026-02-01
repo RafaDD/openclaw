@@ -202,16 +202,17 @@ function handleDiagnosticEvent(
 
 /**
  * Handle model usage events - the primary source of LLM tracing data.
- * Use sessionKey as the primary trace identifier to group all events from the same session.
+ * Use sessionId as the trace identifier so each conversation (after /reset or /new) gets its own trace.
+ * Use sessionKey as the Langfuse session to group related traces from the same user/channel.
  */
 function handleModelUsage(
   evt: Extract<DiagnosticEventPayload, { type: "model.usage" }>,
   traceManager: TraceManager,
   observabilityRegistry: ObservabilityRegistry,
 ): void {
-  // Use sessionKey as the trace identifier to ensure all events from the same session
-  // are grouped into the same trace. sessionId is an internal run ID that changes per message.
-  const traceId = evt.sessionKey ?? evt.sessionId ?? "unknown";
+  // Use sessionId as the trace identifier - it changes when /reset or /new is used.
+  // Use sessionKey for grouping related traces in Langfuse's session view.
+  const traceId = evt.sessionId ?? evt.sessionKey ?? "unknown";
 
   traceManager.recordModelUsage({
     sessionId: traceId,
@@ -240,14 +241,14 @@ function handleModelUsage(
 
 /**
  * Handle message processed events.
- * Use sessionKey as the trace identifier to group with other session events.
+ * Use sessionId as the trace identifier so each conversation gets its own trace.
  */
 function handleMessageProcessed(
   evt: Extract<DiagnosticEventPayload, { type: "message.processed" }>,
   traceManager: TraceManager,
 ): void {
-  // Use sessionKey as the primary trace identifier
-  const traceId = evt.sessionKey ?? evt.sessionId;
+  // Use sessionId as the trace identifier - it changes when /reset or /new is used.
+  const traceId = evt.sessionId ?? evt.sessionKey;
   if (!traceId) {
     return;
   }
@@ -263,7 +264,7 @@ function handleMessageProcessed(
       messageId: evt.messageId,
       chatId: evt.chatId,
       reason: evt.reason,
-      sessionId: evt.sessionId, // Include internal sessionId for debugging
+      sessionKey: evt.sessionKey, // Include sessionKey for grouping
     },
   });
 
@@ -279,36 +280,61 @@ function handleMessageProcessed(
 
 /**
  * Handle session state changes.
- * Use sessionKey as the trace identifier to ensure consistency.
+ * DiagnosticSessionState can be "idle" | "processing" | "waiting" | "ended".
+ * The "ended" state is emitted when /reset or /new is used to finalize the trace.
  */
 function handleSessionState(
   evt: Extract<DiagnosticEventPayload, { type: "session.state" }>,
   traceManager: TraceManager,
   observabilityRegistry: ObservabilityRegistry,
 ): void {
-  // Use sessionKey as the primary trace identifier
-  const traceId = evt.sessionKey ?? evt.sessionId;
+  // Use sessionId as the trace identifier - it changes when /reset or /new is used.
+  const traceId = evt.sessionId ?? evt.sessionKey;
   if (!traceId) {
     return;
   }
 
-  if (evt.state === "ended" || evt.state === "reset") {
-    // End the trace when session ends
+  // Handle "ended" state specially - finalize and close the trace
+  if (evt.state === "ended") {
+    // Emit a final session_state event for consistency with processing/idle/waiting.
+    // Some downstream dashboards expect "session_state:end" specifically.
+    const state = traceManager.getOrCreateTrace(traceId, evt.sessionKey, evt.channel);
+    state.trace.event({
+      name: "session_state:end",
+      metadata: {
+        prevState: evt.prevState,
+        state: evt.state,
+        reason: evt.reason,
+        queueDepth: evt.queueDepth,
+        sessionKey: evt.sessionKey,
+      },
+    });
+
+    // Notify observability providers that trace is ending
     observabilityRegistry.notifyTraceEnd({
       sessionId: traceId,
       sessionKey: evt.sessionKey,
       channel: evt.channel,
     });
+
+    // End and clean up the trace
     traceManager.endTrace(traceId);
-  } else if (evt.state === "started" || evt.state === "resumed") {
-    // Create or get trace on session start
-    traceManager.getOrCreateTrace(traceId, evt.sessionKey, evt.channel);
-    observabilityRegistry.notifyTraceStart({
-      sessionId: traceId,
-      sessionKey: evt.sessionKey,
-      channel: evt.channel,
-    });
+    return;
   }
+
+  // For other states (idle/processing/waiting), just add an event
+  const state = traceManager.getOrCreateTrace(traceId, evt.sessionKey, evt.channel);
+
+  state.trace.event({
+    name: `session_state:${evt.state}`,
+    metadata: {
+      prevState: evt.prevState,
+      state: evt.state,
+      reason: evt.reason,
+      queueDepth: evt.queueDepth,
+      sessionKey: evt.sessionKey,
+    },
+  });
 }
 
 /**
@@ -390,22 +416,21 @@ function handleWebhookError(
 
 /**
  * Handle run attempt events.
- * Use sessionKey as the trace identifier to group with other session events.
+ * Use sessionId as the trace identifier so each conversation gets its own trace.
  */
 function handleRunAttempt(
   evt: Extract<DiagnosticEventPayload, { type: "run.attempt" }>,
   traceManager: TraceManager,
 ): void {
-  // Use sessionKey as the primary trace identifier
-  const traceId = evt.sessionKey ?? evt.sessionId ?? `run_${Date.now()}`;
+  // Use sessionId as the trace identifier - it changes when /reset or /new is used.
+  const traceId = evt.sessionId ?? evt.sessionKey ?? `run_${Date.now()}`;
   const state = traceManager.getOrCreateTrace(traceId, evt.sessionKey, evt.channel);
 
   state.trace.event({
     name: "run_attempt",
     metadata: {
       attempt: evt.attempt,
-      sessionKey: evt.sessionKey,
-      sessionId: evt.sessionId, // Include internal sessionId for debugging
+      sessionKey: evt.sessionKey, // Include sessionKey for grouping
       runId: evt.runId,
       channel: evt.channel,
     },
@@ -420,8 +445,8 @@ function handleToolStart(
   evt: Extract<DiagnosticEventPayload, { type: "tool.start" }>,
   traceManager: TraceManager,
 ): void {
-  // Use sessionKey as the primary trace identifier
-  const traceId = evt.sessionKey ?? evt.runId ?? `tool_${Date.now()}`;
+  // Use sessionId as the trace identifier - it changes when /reset or /new is used.
+  const traceId = evt.sessionId ?? evt.sessionKey ?? evt.runId ?? `tool_${Date.now()}`;
 
   // Ensure trace exists before creating tool span
   traceManager.getOrCreateTrace(traceId, evt.sessionKey, evt.channel);
@@ -446,8 +471,8 @@ function handleToolEnd(
   evt: Extract<DiagnosticEventPayload, { type: "tool.end" }>,
   traceManager: TraceManager,
 ): void {
-  // Use sessionKey as the primary trace identifier (must match tool.start)
-  const traceId = evt.sessionKey ?? evt.runId ?? `tool_${Date.now()}`;
+  // Use sessionId as the trace identifier (must match tool.start)
+  const traceId = evt.sessionId ?? evt.sessionKey ?? evt.runId ?? `tool_${Date.now()}`;
 
   // End the tool span
   traceManager.endToolSpan(traceId, {
@@ -465,8 +490,8 @@ function handleLLMError(
   evt: Extract<DiagnosticEventPayload, { type: "llm.error" }>,
   traceManager: TraceManager,
 ): void {
-  // Use sessionKey as the primary trace identifier
-  const traceId = evt.sessionKey ?? evt.runId ?? `llm_error_${Date.now()}`;
+  // Use sessionId as the trace identifier - it changes when /reset or /new is used.
+  const traceId = evt.sessionId ?? evt.sessionKey ?? evt.runId ?? `llm_error_${Date.now()}`;
 
   // Ensure trace exists
   const state = traceManager.getOrCreateTrace(traceId, evt.sessionKey, evt.channel);
@@ -482,8 +507,7 @@ function handleLLMError(
       errorType: evt.errorType,
       statusCode: evt.statusCode,
       fallbackAttempted: evt.fallbackAttempted,
-      sessionKey: evt.sessionKey,
-      sessionId: evt.sessionId,
+      sessionKey: evt.sessionKey, // Include sessionKey for grouping
       runId: evt.runId,
     },
   });

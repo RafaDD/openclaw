@@ -5,6 +5,7 @@ import type {
 } from "./commands-types.js";
 import { logVerbose } from "../../globals.js";
 import { createInternalHookEvent, triggerInternalHook } from "../../hooks/internal-hooks.js";
+import { emitDiagnosticEvent } from "../../infra/diagnostic-events.js";
 import { resolveSendPolicy } from "../../sessions/send-policy.js";
 import { shouldHandleTextCommands } from "../commands-registry.js";
 import { handleAllowlistCommand } from "./commands-allowlist.js";
@@ -82,6 +83,20 @@ export async function handleCommands(params: HandleCommandsParams): Promise<Comm
       cfg: params.cfg, // Pass config for LLM slug generation
     });
     await triggerInternalHook(hookEvent);
+
+    // Emit session.state:ended for Langfuse trace finalization
+    // Use the previous sessionId (before reset) so the old trace gets properly closed
+    const oldSessionId = params.previousSessionEntry?.sessionId ?? params.sessionEntry?.sessionId;
+    if (oldSessionId) {
+      emitDiagnosticEvent({
+        type: "session.state",
+        sessionKey: params.sessionKey,
+        sessionId: oldSessionId,
+        channel: params.command.channel,
+        state: "ended",
+        reason: commandAction, // "new" or "reset"
+      });
+    }
 
     // Send hook messages immediately if present
     if (hookEvent.messages.length > 0) {

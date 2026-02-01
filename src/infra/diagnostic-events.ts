@@ -1,6 +1,6 @@
 import type { OpenClawConfig } from "../config/config.js";
 
-export type DiagnosticSessionState = "idle" | "processing" | "waiting";
+export type DiagnosticSessionState = "idle" | "processing" | "waiting" | "ended";
 
 type DiagnosticBaseEvent = {
   ts: number;
@@ -83,6 +83,7 @@ export type DiagnosticSessionStateEvent = DiagnosticBaseEvent & {
   type: "session.state";
   sessionKey?: string;
   sessionId?: string;
+  channel?: string;
   prevState?: DiagnosticSessionState;
   state: DiagnosticSessionState;
   reason?: string;

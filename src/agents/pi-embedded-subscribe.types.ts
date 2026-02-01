@@ -7,6 +7,10 @@ export type ToolResultFormat = "markdown" | "plain";
 export type SubscribeEmbeddedPiSessionParams = {
   session: AgentSession;
   runId: string;
+  /** Unique session ID that changes on /reset or /new (for trace isolation). */
+  sessionId?: string;
+  /** Session key for user/channel grouping (e.g., telegram:user:123). */
+  sessionKey?: string;
   verboseLevel?: VerboseLevel;
   reasoningMode?: ReasoningLevel;
   toolResultFormat?: ToolResultFormat;
