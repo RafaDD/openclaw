@@ -3,6 +3,11 @@ import { Type } from "@sinclair/typebox";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import {
+  enforcePolicyDecision,
+  evaluatePathOperation,
+  loadPolicy,
+} from "../security/restricted-ops-policy.js";
 import { applyUpdateHunk } from "./apply-patch-update.js";
 import { assertSandboxPath } from "./sandbox-paths.js";
 
@@ -130,6 +135,8 @@ export async function applyPatch(
     deleted: new Set<string>(),
   };
 
+  const policy = loadPolicy();
+
   for (const hunk of parsed.hunks) {
     if (options.signal?.aborted) {
       const err = new Error("Aborted");
@@ -139,6 +146,11 @@ export async function applyPatch(
 
     if (hunk.kind === "add") {
       const target = await resolvePatchPath(hunk.path, options);
+      const pathEval = await evaluatePathOperation(target.resolved, "add", policy);
+      const enforcement = await enforcePolicyDecision(pathEval, "apply_patch");
+      if (!enforcement.allowed) {
+        throw new Error(enforcement.reason ?? "Operation blocked by policy");
+      }
       await ensureDir(target.resolved);
       await fs.writeFile(target.resolved, hunk.contents, "utf8");
       recordSummary(summary, seen, "added", target.display);
@@ -147,6 +159,11 @@ export async function applyPatch(
 
     if (hunk.kind === "delete") {
       const target = await resolvePatchPath(hunk.path, options);
+      const pathEval = await evaluatePathOperation(target.resolved, "delete", policy);
+      const enforcement = await enforcePolicyDecision(pathEval, "apply_patch");
+      if (!enforcement.allowed) {
+        throw new Error(enforcement.reason ?? "Operation blocked by policy");
+      }
       await fs.rm(target.resolved);
       recordSummary(summary, seen, "deleted", target.display);
       continue;
@@ -157,11 +174,26 @@ export async function applyPatch(
 
     if (hunk.movePath) {
       const moveTarget = await resolvePatchPath(hunk.movePath, options);
+      const sourceEval = await evaluatePathOperation(target.resolved, "move", policy);
+      const sourceEnforcement = await enforcePolicyDecision(sourceEval, "apply_patch");
+      if (!sourceEnforcement.allowed) {
+        throw new Error(sourceEnforcement.reason ?? "Operation blocked by policy");
+      }
+      const destEval = await evaluatePathOperation(moveTarget.resolved, "add", policy);
+      const destEnforcement = await enforcePolicyDecision(destEval, "apply_patch");
+      if (!destEnforcement.allowed) {
+        throw new Error(destEnforcement.reason ?? "Operation blocked by policy");
+      }
       await ensureDir(moveTarget.resolved);
       await fs.writeFile(moveTarget.resolved, applied, "utf8");
       await fs.rm(target.resolved);
       recordSummary(summary, seen, "modified", moveTarget.display);
     } else {
+      const pathEval = await evaluatePathOperation(target.resolved, "modify", policy);
+      const enforcement = await enforcePolicyDecision(pathEval, "apply_patch");
+      if (!enforcement.allowed) {
+        throw new Error(enforcement.reason ?? "Operation blocked by policy");
+      }
       await fs.writeFile(target.resolved, applied, "utf8");
       recordSummary(summary, seen, "modified", target.display);
     }

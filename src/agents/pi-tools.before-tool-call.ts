@@ -1,6 +1,11 @@
 import type { AnyAgentTool } from "./tools/common.js";
 import { createSubsystemLogger } from "../logging/subsystem.js";
 import { getGlobalHookRunner } from "../plugins/hook-runner-global.js";
+import {
+  enforcePolicyDecision,
+  evaluateSecretDetection,
+  loadPolicy,
+} from "../security/restricted-ops-policy.js";
 import { normalizeToolName } from "./tool-policy.js";
 
 type HookContext = {
@@ -22,13 +27,32 @@ export async function runBeforeToolCallHook(args: {
   toolCallId?: string;
   ctx?: HookContext;
 }): Promise<HookOutcome> {
+  const toolName = normalizeToolName(args.toolName || "tool");
+  const params = args.params;
+
+  // Enforce restricted operations policy (rule 4: secret detection)
+  try {
+    const policy = loadPolicy();
+    const secretEval = await evaluateSecretDetection(toolName, params, policy);
+    const secretEnforcement = await enforcePolicyDecision(secretEval, toolName);
+    if (!secretEnforcement.allowed) {
+      return {
+        blocked: true,
+        reason: secretEnforcement.reason ?? "Policy violation: secret detected in parameters",
+      };
+    }
+  } catch (err) {
+    const toolCallId = args.toolCallId ? ` toolCallId=${args.toolCallId}` : "";
+    log.warn(
+      `restricted-ops policy check failed: tool=${toolName}${toolCallId} error=${String(err)}`,
+    );
+  }
+
   const hookRunner = getGlobalHookRunner();
   if (!hookRunner?.hasHooks("before_tool_call")) {
     return { blocked: false, params: args.params };
   }
 
-  const toolName = normalizeToolName(args.toolName || "tool");
-  const params = args.params;
   try {
     const normalizedParams = isPlainObject(params) ? params : {};
     const hookResult = await hookRunner.runBeforeToolCall(
