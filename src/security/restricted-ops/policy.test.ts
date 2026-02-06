@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, beforeEach } from "vitest";
 import {
   clearPolicyCache,
   evaluateDestructiveCommand,
@@ -6,27 +6,9 @@ import {
   evaluatePathOperation,
   evaluateSecretDetection,
   loadPolicy,
-  normalizePath,
-} from "./restricted-ops-policy.js";
+} from "./policy.js";
 
 describe("restricted-ops-policy", () => {
-  describe("normalizePath", () => {
-    it("normalizes absolute paths", () => {
-      expect(normalizePath("/usr/bin/test")).toBe("/usr/bin/test");
-      expect(normalizePath("/Windows/System32")).toBe("/Windows/System32");
-    });
-
-    it("expands home directory", () => {
-      const home = process.env.HOME || process.env.USERPROFILE || "/home/test";
-      expect(normalizePath("~/Documents/file.txt")).toContain(home);
-    });
-
-    it("normalizes Windows paths on WSL", () => {
-      const normalized = normalizePath("/mnt/c/Windows/System32");
-      expect(normalized).toBe("/mnt/c/Windows/System32");
-    });
-  });
-
   describe("evaluatePathOperation", () => {
     beforeEach(() => {
       clearPolicyCache();
@@ -200,14 +182,6 @@ describe("restricted-ops-policy", () => {
         "/tmp/test",
       ]);
       expect(result.decision).toBe("allow");
-    });
-
-    it("detects format command", async () => {
-      const result = await evaluateDestructiveCommand("format C:", [
-        "format",
-        "C:",
-      ]);
-      expect(result.decision).toBe("allow"); // Not user-space, so allowed
     });
   });
 

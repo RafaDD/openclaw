@@ -2,7 +2,7 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { requestExecApprovalViaSocket, resolveExecApprovals } from "../infra/exec-approvals.js";
+import { requestExecApprovalViaSocket, resolveExecApprovals } from "../../infra/exec-approvals.js";
 
 export type PolicyDecision = "allow" | "deny" | "confirm";
 
@@ -15,6 +15,7 @@ export type PolicyEvaluationResult = {
 
 export type RestrictedOpsPolicy = {
   version: 1;
+  enabled?: boolean;
   restrictedPaths?: {
     systemCritical?: string[];
   };
@@ -37,13 +38,13 @@ export type RestrictedOpsPolicy = {
 
 const DEFAULT_POLICY: RestrictedOpsPolicy = {
   version: 1,
+  enabled: true,
   restrictedPaths: {
     systemCritical: [
       "/Windows",
       "/System",
       "/usr",
       "/etc",
-      "/",
       "/mnt/c/Windows",
       "/mnt/c/System",
       "/Program Files",
@@ -92,6 +93,8 @@ function normalizePolicy(file: Partial<RestrictedOpsPolicy>): RestrictedOpsPolic
   const version = file.version === 1 ? 1 : 1;
   return {
     version,
+    enabled:
+      typeof file.enabled === "boolean" ? file.enabled : DEFAULT_POLICY.enabled ?? true,
     restrictedPaths: {
       systemCritical: Array.isArray(file.restrictedPaths?.systemCritical)
         ? file.restrictedPaths.systemCritical
@@ -297,6 +300,9 @@ export async function evaluatePathOperation(
   policy?: RestrictedOpsPolicy,
 ): Promise<PolicyEvaluationResult> {
   const resolvedPolicy = policy ?? loadPolicy();
+  if (resolvedPolicy.enabled === false) {
+    return { decision: "allow" };
+  }
   const normalized = normalizePath(filePath);
   if (isSystemCriticalPath(normalized, resolvedPolicy)) {
     return {
@@ -324,6 +330,9 @@ export async function evaluateSecretDetection(
   policy?: RestrictedOpsPolicy,
 ): Promise<PolicyEvaluationResult> {
   const resolvedPolicy = policy ?? loadPolicy();
+  if (resolvedPolicy.enabled === false) {
+    return { decision: "allow" };
+  }
   const secrets = scanParamsForSecrets(params, toolName, resolvedPolicy);
   if (secrets.length > 0) {
     return {
@@ -346,6 +355,9 @@ export async function evaluateNetworkSend(
   policy?: RestrictedOpsPolicy,
 ): Promise<PolicyEvaluationResult> {
   const resolvedPolicy = policy ?? loadPolicy();
+  if (resolvedPolicy.enabled === false) {
+    return { decision: "allow" };
+  }
   const allowlist = resolvedPolicy.network?.allowlist ?? {};
   const channelAllowlist = allowlist[channel] ?? [];
   if (channelAllowlist.length === 0) {
@@ -393,6 +405,9 @@ export async function evaluateDestructiveCommand(
   policy?: RestrictedOpsPolicy,
 ): Promise<PolicyEvaluationResult> {
   const resolvedPolicy = policy ?? loadPolicy();
+  if (resolvedPolicy.enabled === false) {
+    return { decision: "allow" };
+  }
   const destructiveCommands = new Set([
     "rm",
     "rmdir",

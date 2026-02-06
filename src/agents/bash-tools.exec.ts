@@ -28,11 +28,7 @@ import {
 import { enqueueSystemEvent } from "../infra/system-events.js";
 import { logInfo, logWarn } from "../logger.js";
 import { formatSpawnError, spawnWithFallback } from "../process/spawn-utils.js";
-import {
-  enforcePolicyDecision,
-  evaluateDestructiveCommand,
-  loadPolicy,
-} from "../security/restricted-ops-policy.js";
+import { checkExecCommand } from "../security/restricted-ops/index.js";
 import { parseAgentSessionKey, resolveAgentIdFromSessionKey } from "../routing/session-key.js";
 import {
   type ProcessSession,
@@ -1294,27 +1290,15 @@ export function createExecTool(
           hostSecurity === "allowlist" && analysisOk ? allowlistEval.allowlistSatisfied : false;
 
         // Enforce restricted operations policy (rule 2: destructive commands)
-        try {
-          const policy = loadPolicy();
-          const firstSegment = allowlistEval.segments[0];
-          if (firstSegment) {
-            const destructiveEval = await evaluateDestructiveCommand(
-              params.command,
-              firstSegment.argv,
-              policy,
-            );
-            const destructiveEnforcement = await enforcePolicyDecision(destructiveEval, "exec");
-            if (!destructiveEnforcement.allowed) {
-              throw new Error(
-                destructiveEnforcement.reason ?? "Destructive command blocked by policy",
-              );
-            }
+        const firstSegment = allowlistEval.segments[0];
+        if (firstSegment) {
+          const execCheck = await checkExecCommand({
+            command: params.command,
+            argv: firstSegment.argv,
+          });
+          if (!execCheck.allowed) {
+            throw new Error(execCheck.reason ?? "Destructive command blocked by policy");
           }
-        } catch (err) {
-          if (err instanceof Error && err.message.includes("blocked by policy")) {
-            throw err;
-          }
-          logWarn(`restricted-ops policy check failed for exec: ${String(err)}`);
         }
 
         const requiresAsk = requiresExecApproval({

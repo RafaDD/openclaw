@@ -41,11 +41,7 @@ import {
 } from "./outbound-policy.js";
 import { executePollAction, executeSendAction } from "./outbound-send-service.js";
 import { ensureOutboundSessionEntry, resolveOutboundSessionRoute } from "./outbound-session.js";
-import {
-  enforcePolicyDecision,
-  evaluateNetworkSend,
-  loadPolicy,
-} from "../../security/restricted-ops-policy.js";
+import { checkNetworkSend } from "../../security/restricted-ops/index.js";
 import { resolveChannelTarget, type ResolvedMessagingTarget } from "./target-resolver.js";
 
 export type MessageActionRunnerGateway = {
@@ -764,18 +760,9 @@ async function handleSendAction(ctx: ResolvedActionContext): Promise<MessageActi
 
   // Enforce restricted operations policy (rule 3: network allowlist)
   if (!dryRun) {
-    try {
-      const policy = loadPolicy();
-      const networkEval = await evaluateNetworkSend(channel, to, policy);
-      const networkEnforcement = await enforcePolicyDecision(networkEval, "message");
-      if (!networkEnforcement.allowed) {
-        throw new Error(networkEnforcement.reason ?? "Network send blocked by policy");
-      }
-    } catch (err) {
-      if (err instanceof Error && err.message.includes("blocked by policy")) {
-        throw err;
-      }
-      // Log but don't block if policy check fails (e.g., policy file missing)
+    const networkCheck = await checkNetworkSend({ channel, recipient: to });
+    if (!networkCheck.allowed) {
+      throw new Error(networkCheck.reason ?? "Network send blocked by policy");
     }
   }
 
