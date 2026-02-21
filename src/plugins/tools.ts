@@ -9,6 +9,7 @@ const log = createSubsystemLogger("plugins");
 type PluginToolMeta = {
   pluginId: string;
   optional: boolean;
+  source?: unknown;
 };
 
 const pluginToolMeta = new WeakMap<AnyAgentTool, PluginToolMeta>();
@@ -40,6 +41,16 @@ function isOptionalToolAllowed(params: {
   return params.allowlist.has("group:plugins");
 }
 
+function safeSourceString(source: unknown): string {
+  if (!source) return "unknown";
+  if (typeof source === "string") return source;
+  try {
+    return JSON.stringify(source);
+  } catch {
+    return String(source);
+  }
+}
+
 export function resolvePluginTools(params: {
   context: OpenClawPluginToolContext;
   existingToolNames?: Set<string>;
@@ -58,7 +69,26 @@ export function resolvePluginTools(params: {
 
   const tools: AnyAgentTool[] = [];
   const existing = params.existingToolNames ?? new Set<string>();
-  const existingNormalized = new Set(Array.from(existing, (tool) => normalizeToolName(tool)));
+
+  // existingNormalized: normalized(core/client/tools) name set
+  const existingNormalized = new Set<string>(Array.from(existing, (t) => normalizeToolName(t)));
+
+  // Track who "owns" a normalized tool name, so conflicts print useful provenance
+  // owner = { kind: "core" | "plugin", pluginId?, source?, rawName? }
+  const ownerByNormalizedName = new Map<
+    string,
+    { kind: "core" | "plugin"; pluginId?: string; source?: unknown; rawName?: string }
+  >();
+
+  // Seed owner map with existing tool names as "core"
+  for (const raw of existing) {
+    const n = normalizeToolName(raw);
+    if (!n) continue;
+    if (!ownerByNormalizedName.has(n)) {
+      ownerByNormalizedName.set(n, { kind: "core", rawName: raw });
+    }
+  }
+
   const allowlist = normalizeAllowlist(params.toolAllowlist);
   const blockedPlugins = new Set<string>();
 
@@ -66,10 +96,12 @@ export function resolvePluginTools(params: {
     if (blockedPlugins.has(entry.pluginId)) {
       continue;
     }
+
+    // Normalize plugin id to avoid collision with core tool names
     const pluginIdKey = normalizeToolName(entry.pluginId);
-    if (existingNormalized.has(pluginIdKey)) {
+    if (pluginIdKey && existingNormalized.has(pluginIdKey)) {
       const message = `plugin id conflicts with core tool name (${entry.pluginId})`;
-      log.error(message);
+      log.error(`${message} source=${safeSourceString(entry.source)} normalized=${pluginIdKey}`);
       registry.diagnostics.push({
         level: "error",
         pluginId: entry.pluginId,
@@ -79,16 +111,22 @@ export function resolvePluginTools(params: {
       blockedPlugins.add(entry.pluginId);
       continue;
     }
+
     let resolved: AnyAgentTool | AnyAgentTool[] | null | undefined = null;
     try {
       resolved = entry.factory(params.context);
     } catch (err) {
-      log.error(`plugin tool failed (${entry.pluginId}): ${String(err)}`);
+      log.error(
+        `plugin tool failed (${entry.pluginId}) source=${safeSourceString(entry.source)}: ${String(
+          err,
+        )}`,
+      );
       continue;
     }
     if (!resolved) {
       continue;
     }
+
     const listRaw = Array.isArray(resolved) ? resolved : [resolved];
     const list = entry.optional
       ? listRaw.filter((tool) =>
@@ -99,14 +137,23 @@ export function resolvePluginTools(params: {
           }),
         )
       : listRaw;
+
     if (list.length === 0) {
       continue;
     }
-    const nameSet = new Set<string>();
+
+    // Detect duplicates within the plugin itself by normalized name
+    const pluginLocalNormalized = new Set<string>();
+
     for (const tool of list) {
-      if (nameSet.has(tool.name) || existing.has(tool.name)) {
-        const message = `plugin tool name conflict (${entry.pluginId}): ${tool.name}`;
-        log.error(message);
+      const rawName = tool?.name ?? "";
+      const normalizedName = normalizeToolName(rawName);
+
+      if (!normalizedName) {
+        const message = `plugin tool has empty/invalid name (${entry.pluginId})`;
+        log.error(
+          `${message} raw=${JSON.stringify(rawName)} source=${safeSourceString(entry.source)}`,
+        );
         registry.diagnostics.push({
           level: "error",
           pluginId: entry.pluginId,
@@ -115,12 +162,68 @@ export function resolvePluginTools(params: {
         });
         continue;
       }
-      nameSet.add(tool.name);
-      existing.add(tool.name);
+
+      // Conflict inside the same plugin (after normalize)
+      if (pluginLocalNormalized.has(normalizedName)) {
+        const message = `plugin provides duplicate tool name after normalize (${entry.pluginId}): ${rawName}`;
+        log.error(
+          `${message} normalized=${normalizedName} source=${safeSourceString(entry.source)}`,
+        );
+        registry.diagnostics.push({
+          level: "error",
+          pluginId: entry.pluginId,
+          source: entry.source,
+          message,
+        });
+        continue;
+      }
+      pluginLocalNormalized.add(normalizedName);
+
+      // Conflict with existing tools (core/client/previous plugins) by normalized name
+      if (existingNormalized.has(normalizedName)) {
+        const prev = ownerByNormalizedName.get(normalizedName);
+        const prevDesc = prev
+          ? prev.kind === "plugin"
+            ? `plugin:${prev.pluginId} source=${safeSourceString(prev.source)} raw=${JSON.stringify(
+                prev.rawName,
+              )}`
+            : `core raw=${JSON.stringify(prev.rawName)}`
+          : "unknown";
+
+        const message = `plugin tool name conflict (${entry.pluginId}): ${rawName}`;
+        log.error(
+          `${message} normalized=${normalizedName} thisSource=${safeSourceString(
+            entry.source,
+          )} prev=${prevDesc}`,
+        );
+        registry.diagnostics.push({
+          level: "error",
+          pluginId: entry.pluginId,
+          source: entry.source,
+          message,
+        });
+
+        // IMPORTANT: skip the conflicting tool (do not add)
+        continue;
+      }
+
+      // OK: register tool
+      existingNormalized.add(normalizedName);
+      existing.add(rawName);
+
+      ownerByNormalizedName.set(normalizedName, {
+        kind: "plugin",
+        pluginId: entry.pluginId,
+        source: entry.source,
+        rawName,
+      });
+
       pluginToolMeta.set(tool, {
         pluginId: entry.pluginId,
         optional: entry.optional,
+        source: entry.source,
       });
+
       tools.push(tool);
     }
   }

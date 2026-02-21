@@ -1,3 +1,5 @@
+// src/agents/pi-embedded-runner/run/attempt.ts
+
 import type { AgentMessage } from "@mariozechner/pi-agent-core";
 import type { ImageContent } from "@mariozechner/pi-ai";
 import { streamSimple } from "@mariozechner/pi-ai";
@@ -11,6 +13,8 @@ import { getMachineDisplayName } from "../../../infra/machine-name.js";
 import { MAX_IMAGE_BYTES } from "../../../media/constants.js";
 import { getGlobalHookRunner } from "../../../plugins/hook-runner-global.js";
 import { isSubagentSessionKey } from "../../../routing/session-key.js";
+// ✅ NEW (correct path & spelling): agentarmour.ts -> import .js
+import { beginUserTurn } from "../../../security/restricted-ops/agentarmour.js";
 import { resolveSignalReactionLevel } from "../../../signal/reaction-level.js";
 import { resolveTelegramInlineButtonsScope } from "../../../telegram/inline-buttons.js";
 import { resolveTelegramReactionLevel } from "../../../telegram/reaction-level.js";
@@ -161,6 +165,12 @@ export async function runEmbeddedAttempt(
     : resolvedWorkspace;
   await fs.mkdir(effectiveWorkspace, { recursive: true });
 
+  // ✅ NEW: canonical provenance/session id (use everywhere: tools + beginUserTurn + wrappers)
+  const policySessionId =
+    (typeof params.sessionKey === "string" && params.sessionKey.trim().length > 0
+      ? params.sessionKey.trim()
+      : params.sessionId) || "default";
+
   let restoreSkillEnv: (() => void) | undefined;
   process.chdir(effectiveWorkspace);
   try {
@@ -224,7 +234,8 @@ export async function runEmbeddedAttempt(
           senderName: params.senderName,
           senderUsername: params.senderUsername,
           senderE164: params.senderE164,
-          sessionKey: params.sessionKey ?? params.sessionId,
+          // ✅ IMPORTANT: use canonical id so provenance/taint matches tool recording
+          sessionKey: policySessionId,
           agentDir,
           workspaceDir: effectiveWorkspace,
           config: params.config,
@@ -748,6 +759,16 @@ export async function runEmbeddedAttempt(
           log.warn(
             `Removed orphaned user message to prevent consecutive user turns. ` +
               `runId=${params.runId} sessionId=${params.sessionId}`,
+          );
+        }
+
+        // ✅ NEW: currentTurnOnly provenance entrypoint (DO NOT use effectivePrompt!)
+        try {
+          beginUserTurn(policySessionId, params.prompt);
+        } catch (e) {
+          // Don't break run if provenance tracker fails
+          log.warn(
+            `beginUserTurn failed (ignored): sessionId=${policySessionId} error=${String(e)}`,
           );
         }
 
